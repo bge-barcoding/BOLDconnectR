@@ -57,9 +57,19 @@ BOLD_DATA_RETRIEVE       <- "https://data.boldsystems.org/api/records/retrieve?"
   successful$matched <- gsub(',.*', "", successful$matched)
   successful$names <- gsub("^na:na:", "", successful$submitted)
 
-  # Verify no "ids:" prefix (indicates bad input)
-  if (any(grepl("ids:", successful$matched))) {
-    stop("Re-check search queries — some terms resolved to IDs instead of taxonomy/geography.")
+  # Filter out terms that resolved to raw IDs instead of taxonomy/geography.
+  # This happens when BOLD can't match a name taxonomically (e.g. mites,
+  # obscure taxa). Instead of failing the whole batch, drop those terms and
+  # warn so the remaining valid species can still be searched.
+  ids_mask <- grepl("ids:", successful$matched)
+  if (any(ids_mask)) {
+    bad_names <- successful$names[ids_mask]
+    warning("The following terms could not be resolved taxonomically and were skipped: ",
+            paste(bad_names, collapse = ", "), call. = FALSE)
+    successful <- successful[!ids_mask, , drop = FALSE]
+    if (nrow(successful) == 0) {
+      stop("No terms could be resolved taxonomically. Re-check search queries.")
+    }
   }
 
   successful
@@ -277,6 +287,10 @@ bold_public_search_batch <- function(species_list,
         # Parse skipped species from warning messages
         for (wmsg in batch_warnings) {
           if (grepl("returned 0 records and were skipped", wmsg)) {
+            skipped <- sub(".*skipped: ", "", wmsg)
+            all_missing <<- c(all_missing, trimws(strsplit(skipped, ",")[[1]]))
+          }
+          if (grepl("could not be resolved taxonomically and were skipped", wmsg)) {
             skipped <- sub(".*skipped: ", "", wmsg)
             all_missing <<- c(all_missing, trimws(strsplit(skipped, ",")[[1]]))
           }
