@@ -111,7 +111,7 @@ preprocess_query<-function(parsed_query)
 
 #3. Count for a) selecting the number of records which have more than 0 counts for each term & b) displaying the total number of specimens data available for download
 
-counts_query<-function (preprocessed_query)
+counts_query<-function (preprocessed_query, taxonomy_only = FALSE)
 {
 
   #a. Record counts url (will be separate for each triplet)
@@ -176,9 +176,27 @@ counts_query<-function (preprocessed_query)
   # For displaying number of specimen records available
 
 
-  # Check for 0 observations. This is put to check any misspellings or no data availability condition in the multi parameter queries which if not dealt with will return the entire dataset of the correctly spelled/available data query terms. Ex. Panthera leo + India vs Panthera leoss + India; the former will correctly query using 'and' logic while the latter due to a misspelling would retrieve all the data pertaining to India.
+  # Check for 0 observations. In multi-parameter queries (e.g. taxonomy + geography), a zero-count taxonomy term would be silently dropped, leaving the geography unconstrained and returning far more data than intended (e.g. "Panthera leoss" + "India" would return ALL India records). For taxonomy-only searches this risk does not exist — zero-count terms are simply species not on BOLD, and removing them from the OR query is safe.
 
-  if (any(result$counts_df[["observations"]] == 0, na.rm = TRUE)) return(NULL)
+  zero_mask <- result$counts_df[["observations"]] == 0
+
+  if (any(zero_mask, na.rm = TRUE)) {
+    if (taxonomy_only) {
+      # Taxonomy-only search: skip missing terms with a warning
+      missing_terms <- result$counts_df$names[zero_mask]
+      warning(
+        "The following terms returned 0 records and were skipped: ",
+        paste(missing_terms, collapse = ", "),
+        call. = FALSE
+      )
+      result$counts_df <- result$counts_df[!zero_mask, , drop = FALSE]
+      # If ALL terms are zero, nothing to search
+      if (nrow(result$counts_df) == 0) return(NULL)
+    } else {
+      # Multi-parameter search: fail to prevent silent data corruption
+      return(NULL)
+    }
+  }
 
   return(result)
 

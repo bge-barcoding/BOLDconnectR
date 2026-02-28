@@ -8,7 +8,7 @@
 #' @param bins A list of single or multiple characters specifying the BIN ids. Default value is NULL.
 #' @param dataset_codes A list of single or multiple characters specifying the dataset codes. Default value is NULL.
 #' @param project_codes A list of single or multiple characters specifying the project codes. Default value is NULL.
-#' @details `bold.public.search` searches publicly available data on BOLD, retrieving associated proccessids and marker codes. All the BCDM data can then be retrieved using the processids as inputs for the `bold.fetch` function. Search parameters can include one or a combination of taxonomy, geography, bin uris, dataset or project codes. Each input should be provided as a separate list (Ex. taxonomy = list("Panthera", "Poecilia"), geography = list("India)). A dataframe column can also be used as an input using the '$' operator (e.g., df$column_name). If this is the case (i.e. df$column_name), `as.list` should be used instead of just `list` (Ex. taxonomy = as.list (df$column_name), geography = as.list(df$column_name)). The character length of a search query should also be considered as the function wont be able to retrieve records if that exceeds the predetermined web URL character length (2048 characters). For multi-parameter searches (e.g. taxonomy + geography + bins; see the example: Taxonomy + Geography + BIN id), it’s important to logically  combine the parameters to ensure accurate and non-empty results. Misspelled queries or those for which no public data exists on BOLD at the time the function is executed will result in an error. This applies for any of the search parameters. There is a hard limit of 1 million record downloads for each search. Download speeds for very large requests for `bin_uris`, `dataset_codes` and `project_codes` will be throttled, resulting in more time for fetching the data. Download speed would also depend on the user’s internet connection and computer specifications.
+#' @details `bold.public.search` searches publicly available data on BOLD, retrieving associated proccessids and marker codes. All the BCDM data can then be retrieved using the processids as inputs for the `bold.fetch` function. Search parameters can include one or a combination of taxonomy, geography, bin uris, dataset or project codes. Each input should be provided as a separate list (Ex. taxonomy = list("Panthera", "Poecilia"), geography = list("India)). A dataframe column can also be used as an input using the '$' operator (e.g., df$column_name). If this is the case (i.e. df$column_name), `as.list` should be used instead of just `list` (Ex. taxonomy = as.list (df$column_name), geography = as.list(df$column_name)). The character length of a search query should also be considered as the function wont be able to retrieve records if that exceeds the predetermined web URL character length (2048 characters). For multi-parameter searches (e.g. taxonomy + geography + bins; see the example: Taxonomy + Geography + BIN id), it’s important to logically  combine the parameters to ensure accurate and non-empty results. Misspelled queries or those for which no public data exists on BOLD at the time the function is executed will result in an error when used in multi-parameter searches (e.g. taxonomy + geography). For taxonomy-only searches, missing terms are skipped with a warning and the remaining terms are searched. This applies for any of the search parameters. There is a hard limit of 1 million record downloads for each search. Download speeds for very large requests for `bin_uris`, `dataset_codes` and `project_codes` will be throttled, resulting in more time for fetching the data. Download speed would also depend on the user’s internet connection and computer specifications.
 #'
 #' @examples
 #' \donttest{
@@ -144,6 +144,10 @@ bold.public.search <- function(taxonomy = NULL,
   {
     cat(red_col,"Downloading ids.",reset_col,'\r')
 
+    # Determine if this is a taxonomy-only search. When TRUE, zero-count terms
+    # are skipped with a warning instead of aborting the entire search.
+    is_taxonomy_only <- (names(non_null_args) == "taxonomy")
+
     # To capture the query being too long error (character limit)
 
     step1 = parse_query(trial_query_input)
@@ -153,7 +157,7 @@ bold.public.search <- function(taxonomy = NULL,
     result = tryCatch(
 
       {
-        step3 = counts_query(step2)
+        step3 = counts_query(step2, taxonomy_only = is_taxonomy_only)
 
         # Function checks whether the input query terms entered are correctly added in the respective parameter arguments. Example: Costa Rica should be placed in geography and not in taxonomy. If the function finds such a placement, the code will stop and the final result obtained will be NULL.
 
