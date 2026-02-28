@@ -23,10 +23,9 @@ ui <- fluidPage(
                     rows = 5),
       textInput("geography", "Geography filter (optional)",
                 placeholder = "e.g. India"),
-      numericInput("batch_size", "Species per batch (taxonomy-only)",
-                   value = 50, min = 1, max = 200, step = 10),
-      helpText("When no geography filter is set, species are searched in batches.",
-               "Missing species are skipped automatically.",
+      helpText("Without a geography filter, species are batched automatically",
+               "(sized to fit within API URL limits).",
+               "Missing species are skipped with a warning.",
                "With a geography filter, each species is searched individually."),
       actionButton("search_btn", "Search BOLD", class = "btn-primary"),
 
@@ -65,14 +64,12 @@ server <- function(input, output, session) {
     }
 
     geo <- if (nchar(trimws(input$geography)) > 0) list(trimws(input$geography)) else NULL
-    bs <- input$batch_size
 
-    n_batches <- if (is.null(geo)) ceiling(length(species_list) / bs) else length(species_list)
     mode_label <- if (is.null(geo)) {
-      sprintf("Taxonomy-only: %d species in %d batch(es) of up to %d",
-              length(species_list), n_batches, bs)
+      sprintf("Taxonomy-only: searching %d species (auto-batched by URL length)...",
+              length(species_list))
     } else {
-      sprintf("Taxonomy + geography: searching %d species individually",
+      sprintf("Taxonomy + geography: searching %d species individually...",
               length(species_list))
     }
     rv$status <- mode_label
@@ -81,7 +78,6 @@ server <- function(input, output, session) {
       results <- bold_public_search_batch(
         species_list = species_list,
         geography = geo,
-        batch_size = bs,
         quiet = FALSE
       )
     })

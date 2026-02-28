@@ -31,11 +31,14 @@ BOLD_DATA_RETRIEVE       <- "https://data.boldsystems.org/api/records/retrieve?"
 # ---------------------------------------------------------------------------
 
 # Step 1: Parse the query terms
+# Uses httr::GET instead of fromJSON(url(...)) for better handling of long URLs
 .parse_query <- function(query_terms) {
   quoted <- paste0('%22', gsub(' ', '%20', query_terms), '%22')
   combined <- paste(quoted, collapse = '%20')
   full_url <- URLencode(paste0(BOLD_PORTAL_PARSE, combined))
-  fromJSON(url(full_url))
+  res <- GET(url = full_url, add_headers('accept' = 'application/json'))
+  stop_for_status(res)
+  fromJSON(content(res, "text", encoding = "UTF-8"))
 }
 
 # Step 2: Preprocess — resolve terms to BOLD triplets
@@ -195,8 +198,11 @@ bold_public_search <- function(taxonomy = NULL,
 #' @param institutes  Optional list of institute filters
 #' @param dataset_codes Optional list of dataset code filters
 #' @param project_codes Optional list of project code filters
-#' @param batch_size  Max species per API call (default 50). Only used for
-#'                    taxonomy-only searches; ignored when other params are set.
+#' @param max_url_length Max URL length per API call (default 1500). Species
+#'                       are grouped into batches that keep URLs under this limit.
+#'                       The BOLD portal has a ~2048 char URL limit; 1500 provides
+#'                       headroom for encoding overhead. Only used for taxonomy-only
+#'                       searches; ignored when other params are set.
 #' @param quiet       Suppress per-species progress messages (default FALSE)
 #' @param sleep       Seconds to pause between API calls (default 0.5)
 #' @return List with $data (combined data frame) and $summary (text report)
@@ -206,7 +212,7 @@ bold_public_search_batch <- function(species_list,
                                      institutes = NULL,
                                      dataset_codes = NULL,
                                      project_codes = NULL,
-                                     batch_size = 50,
+                                     max_url_length = 1500,
                                      quiet = FALSE,
                                      sleep = 0.5) {
 
@@ -217,11 +223,37 @@ bold_public_search_batch <- function(species_list,
   all_missing <- character(0)
 
   if (!has_other_params) {
-    # --- Taxonomy-only: batch up to batch_size names per call ---
+    # --- Taxonomy-only: batch by URL length ---
     # bold_public_search + .counts_query already skip zero-count terms with a
     # warning for taxonomy-only searches, so we can send many names at once.
+    # We group species into batches that keep the parse URL under max_url_length.
 
-    batches <- split(species_list, ceiling(seq_along(species_list) / batch_size))
+    # Base URL length: "https://portal.boldsystems.org/api/query/parse?query=" = 53 chars
+    base_len <- 53
+    batches <- list()
+    current_batch <- character(0)
+    # Each species adds: %22Name%20Name%22 = 4 + nchar(name) + 3*(spaces) chars,
+    # plus %20 separator (3 chars) between terms
+    current_len <- base_len
+
+    for (sp in species_list) {
+      # Encoded length: %22 (3) + name with spaces as %20 (nchar + 2*spaces) + %22 (3)
+      n_spaces <- lengths(regmatches(sp, gregexpr(" ", sp)))
+      sp_encoded_len <- 3 + nchar(sp) + (n_spaces * 2) + 3
+      sep_len <- if (length(current_batch) > 0) 3 else 0  # %20 separator
+
+      if (current_len + sep_len + sp_encoded_len > max_url_length && length(current_batch) > 0) {
+        batches[[length(batches) + 1]] <- current_batch
+        current_batch <- sp
+        current_len <- base_len + sp_encoded_len
+      } else {
+        current_batch <- c(current_batch, sp)
+        current_len <- current_len + sep_len + sp_encoded_len
+      }
+    }
+    if (length(current_batch) > 0) {
+      batches[[length(batches) + 1]] <- current_batch
+    }
 
     for (b in seq_along(batches)) {
       batch <- batches[[b]]
