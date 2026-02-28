@@ -183,8 +183,11 @@ bold_public_search <- function(taxonomy = NULL,
 # ---------------------------------------------------------------------------
 #' Batch search for multiple species with resilience to missing taxa
 #'
-#' Iterates over each species individually. Species not found on BOLD are
-#' skipped with a warning. Results are combined and deduplicated.
+#' Sends species in batches of up to `batch_size` names per API call to stay
+#' within URL length limits (~2048 chars). Within each batch, species not found
+#' on BOLD are skipped with a warning (taxonomy-only search resilience).
+#' If geography or other parameters are also provided, the function falls back
+#' to one-species-at-a-time to preserve the multi-parameter safety guard.
 #'
 #' @param species_list Character vector of species names
 #' @param geography   Optional list of geography filters (applied to all species)
@@ -192,6 +195,8 @@ bold_public_search <- function(taxonomy = NULL,
 #' @param institutes  Optional list of institute filters
 #' @param dataset_codes Optional list of dataset code filters
 #' @param project_codes Optional list of project code filters
+#' @param batch_size  Max species per API call (default 50). Only used for
+#'                    taxonomy-only searches; ignored when other params are set.
 #' @param quiet       Suppress per-species progress messages (default FALSE)
 #' @param sleep       Seconds to pause between API calls (default 0.5)
 #' @return List with $data (combined data frame) and $summary (text report)
@@ -201,54 +206,115 @@ bold_public_search_batch <- function(species_list,
                                      institutes = NULL,
                                      dataset_codes = NULL,
                                      project_codes = NULL,
+                                     batch_size = 50,
                                      quiet = FALSE,
                                      sleep = 0.5) {
 
+  has_other_params <- !is.null(geography) || !is.null(bins) ||
+    !is.null(institutes) || !is.null(dataset_codes) || !is.null(project_codes)
+
   results <- list()
-  found <- character(0)
-  missing <- character(0)
+  all_missing <- character(0)
 
-  for (i in seq_along(species_list)) {
-    sp <- species_list[i]
+  if (!has_other_params) {
+    # --- Taxonomy-only: batch up to batch_size names per call ---
+    # bold_public_search + .counts_query already skip zero-count terms with a
+    # warning for taxonomy-only searches, so we can send many names at once.
 
-    if (!quiet) message(sprintf("[%d/%d] Searching: %s", i, length(species_list), sp))
+    batches <- split(species_list, ceiling(seq_along(species_list) / batch_size))
 
-    res <- tryCatch(
-      bold_public_search(
-        taxonomy = list(sp),
-        geography = geography,
-        bins = bins,
-        institutes = institutes,
-        dataset_codes = dataset_codes,
-        project_codes = project_codes
-      ),
-      error = function(e) NULL
-    )
+    for (b in seq_along(batches)) {
+      batch <- batches[[b]]
 
-    if (!is.null(res) && nrow(res) > 0) {
-      found <- c(found, sp)
-      results[[length(results) + 1]] <- res
-    } else {
-      missing <- c(missing, sp)
-      if (!quiet) warning("No records found for: ", sp, call. = FALSE)
+      if (!quiet) {
+        message(sprintf("[Batch %d/%d] Searching %d species...",
+                        b, length(batches), length(batch)))
+      }
+
+      res <- tryCatch({
+        # Capture warnings to extract skipped species names
+        batch_warnings <- character(0)
+        result <- withCallingHandlers(
+          bold_public_search(taxonomy = as.list(batch)),
+          warning = function(w) {
+            batch_warnings <<- c(batch_warnings, conditionMessage(w))
+            invokeRestart("muffleWarning")
+          }
+        )
+
+        # Parse skipped species from warning messages
+        for (wmsg in batch_warnings) {
+          if (grepl("returned 0 records and were skipped", wmsg)) {
+            skipped <- sub(".*skipped: ", "", wmsg)
+            all_missing <<- c(all_missing, trimws(strsplit(skipped, ",")[[1]]))
+          }
+          if (!quiet) warning(wmsg, call. = FALSE)
+        }
+
+        result
+      },
+      error = function(e) {
+        if (!quiet) warning("Batch failed: ", e$message, call. = FALSE)
+        NULL
+      })
+
+      if (!is.null(res) && nrow(res) > 0) {
+        results[[length(results) + 1]] <- res
+      }
+
+      if (b < length(batches)) Sys.sleep(sleep)
     }
 
-    if (i < length(species_list)) Sys.sleep(sleep)
+  } else {
+    # --- Multi-parameter: one species at a time ---
+    # With geography/bins/etc, the zero-count guard must stay active to prevent
+    # silent data corruption, so we search each species individually.
+
+    for (i in seq_along(species_list)) {
+      sp <- species_list[i]
+      if (!quiet) message(sprintf("[%d/%d] Searching: %s", i, length(species_list), sp))
+
+      res <- tryCatch(
+        bold_public_search(
+          taxonomy = list(sp),
+          geography = geography,
+          bins = bins,
+          institutes = institutes,
+          dataset_codes = dataset_codes,
+          project_codes = project_codes
+        ),
+        error = function(e) NULL
+      )
+
+      if (!is.null(res) && nrow(res) > 0) {
+        results[[length(results) + 1]] <- res
+      } else {
+        all_missing <- c(all_missing, sp)
+        if (!quiet) warning("No records found for: ", sp, call. = FALSE)
+      }
+
+      if (i < length(species_list)) Sys.sleep(sleep)
+    }
   }
 
+  # --- Combine results ---
   if (length(results) == 0) {
-    summary_text <- sprintf("No records found for any of the %d species searched.", length(species_list))
+    summary_text <- sprintf("No records found for any of the %d species searched.",
+                            length(species_list))
     return(list(data = NULL, summary = summary_text))
   }
 
   combined <- bind_rows(results) %>% distinct()
+  n_found <- length(species_list) - length(all_missing)
 
   summary_text <- sprintf(
     "Retrieved %d records for %d of %d species.%s",
     nrow(combined),
-    length(found),
+    n_found,
     length(species_list),
-    if (length(missing) > 0) paste0("\nNot found on BOLD: ", paste(missing, collapse = ", ")) else ""
+    if (length(all_missing) > 0)
+      paste0("\nNot found on BOLD: ", paste(all_missing, collapse = ", "))
+    else ""
   )
 
   if (!quiet) message(summary_text)

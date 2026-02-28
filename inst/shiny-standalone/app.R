@@ -23,6 +23,11 @@ ui <- fluidPage(
                     rows = 5),
       textInput("geography", "Geography filter (optional)",
                 placeholder = "e.g. India"),
+      numericInput("batch_size", "Species per batch (taxonomy-only)",
+                   value = 50, min = 1, max = 200, step = 10),
+      helpText("When no geography filter is set, species are searched in batches.",
+               "Missing species are skipped automatically.",
+               "With a geography filter, each species is searched individually."),
       actionButton("search_btn", "Search BOLD", class = "btn-primary"),
 
       hr(),
@@ -49,7 +54,7 @@ server <- function(input, output, session) {
 
   rv <- reactiveValues(data = NULL, status = "Ready.")
 
-  # --- Public Search (batch, per-species) ---
+  # --- Public Search (batched taxonomy or per-species with geography) ---
   observeEvent(input$search_btn, {
     species_list <- trimws(unlist(strsplit(input$species, "\n")))
     species_list <- species_list[nchar(species_list) > 0]
@@ -60,13 +65,23 @@ server <- function(input, output, session) {
     }
 
     geo <- if (nchar(trimws(input$geography)) > 0) list(trimws(input$geography)) else NULL
+    bs <- input$batch_size
 
-    rv$status <- paste0("Searching for ", length(species_list), " species...")
+    n_batches <- if (is.null(geo)) ceiling(length(species_list) / bs) else length(species_list)
+    mode_label <- if (is.null(geo)) {
+      sprintf("Taxonomy-only: %d species in %d batch(es) of up to %d",
+              length(species_list), n_batches, bs)
+    } else {
+      sprintf("Taxonomy + geography: searching %d species individually",
+              length(species_list))
+    }
+    rv$status <- mode_label
 
     withProgress(message = "Searching BOLD...", value = 0, {
       results <- bold_public_search_batch(
         species_list = species_list,
         geography = geo,
+        batch_size = bs,
         quiet = FALSE
       )
     })
