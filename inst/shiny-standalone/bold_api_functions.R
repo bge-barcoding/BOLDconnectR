@@ -27,11 +27,45 @@ BOLD_PORTAL_DOWNLOAD     <- "https://portal.boldsystems.org/api/documents/"
 BOLD_DATA_RETRIEVE       <- "https://data.boldsystems.org/api/records/retrieve?"
 
 # ---------------------------------------------------------------------------
+# Shared constant: BOLD API query-parameter character limit
+# The preprocessor, query, and summary endpoints all enforce maxLength: 250
+# on the "query" parameter value. We use 245 to leave a small safety margin.
+# ---------------------------------------------------------------------------
+BOLD_QUERY_PARAM_LIMIT <- 245
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+# Utility: split a character vector of terms into groups where the
+# semicolon-joined string of each group is <= max_chars.
+.split_terms <- function(terms, max_chars = BOLD_QUERY_PARAM_LIMIT) {
+  groups <- list()
+  current <- character(0)
+  current_len <- 0L
+
+  for (term in terms) {
+    term_len <- nchar(term)
+    sep_len <- if (length(current) > 0) 1L else 0L  # ";" separator
+
+    if (current_len + sep_len + term_len > max_chars && length(current) > 0) {
+      groups[[length(groups) + 1]] <- current
+      current <- term
+      current_len <- term_len
+    } else {
+      current <- c(current, term)
+      current_len <- current_len + sep_len + term_len
+    }
+  }
+  if (length(current) > 0) {
+    groups[[length(groups) + 1]] <- current
+  }
+  groups
+}
+
 # Step 1: Parse the query terms
-# Uses httr::GET instead of fromJSON(url(...)) for better handling of long URLs
+# Uses httr::GET instead of fromJSON(url(...)) for better handling of long URLs.
+# The parse endpoint has no maxLength constraint, so we can send many terms.
 .parse_query <- function(query_terms) {
   quoted <- paste0('%22', gsub(' ', '%20', query_terms), '%22')
   combined <- paste(quoted, collapse = '%20')
@@ -42,18 +76,31 @@ BOLD_DATA_RETRIEVE       <- "https://data.boldsystems.org/api/records/retrieve?"
 }
 
 # Step 2: Preprocess — resolve terms to BOLD triplets
+# The preprocessor endpoint enforces maxLength: 250 on the query parameter,
+# so we split the parsed terms (semicolon-delimited) into chunks that fit.
 .preprocess_query <- function(parsed) {
-  encoded <- gsub(":", "%3A",
-               gsub(";", "%3B",
-                 gsub(",", "%2C",
-                   gsub(" ", "%20", parsed$terms))))
-  full_url <- URLencode(paste0(BOLD_PORTAL_PREPROCESS, encoded))
+  # parsed$terms is a semicolon-delimited string like "tax:na:Panthera leo;tax:na:Baetis rhodani"
+  individual_terms <- strsplit(parsed$terms, ";")[[1]]
 
-  res <- GET(url = full_url, add_headers('accept' = 'application/json'))
-  stop_for_status(res)
+  groups <- .split_terms(individual_terms)
 
-  json_data <- fromJSON(content(res, "text", encoding = "UTF-8"))
-  successful <- json_data$successful_terms
+  all_successful <- list()
+  for (group in groups) {
+    query_value <- paste(group, collapse = ";")
+    encoded <- gsub(":", "%3A",
+                 gsub(";", "%3B",
+                   gsub(",", "%2C",
+                     gsub(" ", "%20", query_value))))
+    full_url <- URLencode(paste0(BOLD_PORTAL_PREPROCESS, encoded))
+
+    res <- GET(url = full_url, add_headers('accept' = 'application/json'))
+    stop_for_status(res)
+
+    json_data <- fromJSON(content(res, "text", encoding = "UTF-8"))
+    all_successful[[length(all_successful) + 1]] <- json_data$successful_terms
+  }
+
+  successful <- bind_rows(all_successful)
   successful$matched <- gsub(',.*', "", successful$matched)
   successful$names <- gsub("^na:na:", "", successful$submitted)
 
@@ -112,61 +159,28 @@ BOLD_DATA_RETRIEVE       <- "https://data.boldsystems.org/api/records/retrieve?"
 }
 
 # Step 4: Generate query ID(s) and build download URL(s)
-# When many species are in the batch, the matched triplets (e.g.
-# "taxonomy:Animalia,Chordata,...,Panthera leo") can be very long.
-# Concatenating them all with semicolons can exceed the ~2048 char URL limit,
-# causing HTTP 422. This function splits terms into sub-groups that each fit
-# within the limit and returns a vector of download URLs.
-.generate_query_id <- function(counts_df, max_url_length = 1500) {
+# The /api/query endpoint enforces maxLength: 250 on the query parameter value.
+# Matched triplets (e.g. "taxonomy:Animalia,Chordata,...,Panthera leo") are long,
+# so we split them into groups that fit within the limit and make separate calls.
+.generate_query_id <- function(counts_df) {
   non_zero <- counts_df %>%
     filter(observations > 0) %>%
     arrange(desc(observations))
 
   if (nrow(non_zero) == 0) return(character(0))
 
-  # Encode each matched term individually so we can measure lengths
-  encode_term <- function(term) {
-    gsub("/", "%2F",
-      gsub(" ", "%20",
-        gsub(":", "%3A",
-          gsub(";", "%3B",
-            gsub(",", "%2C", term)))))
-  }
-
-  encoded_terms <- vapply(non_zero$matched, encode_term, character(1),
-                          USE.NAMES = FALSE)
-
-  # Base: "https://portal.boldsystems.org/api/query?query=" (48) + "&extent=full" (12) = 60
-  base_len <- nchar(BOLD_PORTAL_QUERY) + nchar("&extent=full")
-
-  # Group terms into sub-batches that fit within max_url_length
-  groups <- list()
-  current_group <- character(0)
-  current_len <- base_len
-
-  for (i in seq_along(encoded_terms)) {
-    term <- encoded_terms[i]
-    # Separator between terms is encoded ";" = "%3B" (3 chars)
-    sep_len <- if (length(current_group) > 0) 3 else 0
-    term_len <- nchar(term)
-
-    if (current_len + sep_len + term_len > max_url_length && length(current_group) > 0) {
-      groups[[length(groups) + 1]] <- current_group
-      current_group <- term
-      current_len <- base_len + term_len
-    } else {
-      current_group <- c(current_group, term)
-      current_len <- current_len + sep_len + term_len
-    }
-  }
-  if (length(current_group) > 0) {
-    groups[[length(groups) + 1]] <- current_group
-  }
+  # Split matched terms into groups that fit within the 250-char query param limit
+  groups <- .split_terms(non_zero$matched)
 
   # Make a query call per group and collect download URLs
   download_urls <- vapply(groups, function(group) {
-    query_part <- paste(group, collapse = "%3B")
-    full_url <- paste0(BOLD_PORTAL_QUERY, query_part, "&extent=full")
+    query_value <- paste(group, collapse = ";")
+    encoded <- gsub("/", "%2F",
+                 gsub(" ", "%20",
+                   gsub(":", "%3A",
+                     gsub(";", "%3B",
+                       gsub(",", "%2C", query_value)))))
+    full_url <- paste0(BOLD_PORTAL_QUERY, encoded, "&extent=full")
     res <- GET(url = full_url, add_headers('accept' = 'application/json'))
     stop_for_status(res)
 
@@ -245,9 +259,11 @@ bold_public_search <- function(taxonomy = NULL,
 # ---------------------------------------------------------------------------
 #' Batch search for multiple species with resilience to missing taxa
 #'
-#' Sends species in batches of up to `batch_size` names per API call to stay
-#' within URL length limits (~2048 chars). Within each batch, species not found
-#' on BOLD are skipped with a warning (taxonomy-only search resilience).
+#' Species are sent in batches to the parse endpoint (which has no length
+#' limit). The internal helpers (.preprocess_query, .generate_query_id) then
+#' automatically split the resulting terms into sub-requests that respect the
+#' BOLD API's 250-character query parameter limit. Within each batch, species
+#' not found on BOLD are skipped with a warning (taxonomy-only resilience).
 #' If geography or other parameters are also provided, the function falls back
 #' to one-species-at-a-time to preserve the multi-parameter safety guard.
 #'
@@ -257,11 +273,9 @@ bold_public_search <- function(taxonomy = NULL,
 #' @param institutes  Optional list of institute filters
 #' @param dataset_codes Optional list of dataset code filters
 #' @param project_codes Optional list of project code filters
-#' @param max_url_length Max URL length per API call (default 1500). Species
-#'                       are grouped into batches that keep URLs under this limit.
-#'                       The BOLD portal has a ~2048 char URL limit; 1500 provides
-#'                       headroom for encoding overhead. Only used for taxonomy-only
-#'                       searches; ignored when other params are set.
+#' @param batch_size  Max species per parse-level API call (default 50).
+#'                    Only used for taxonomy-only searches; ignored when
+#'                    other params are set.
 #' @param quiet       Suppress per-species progress messages (default FALSE)
 #' @param sleep       Seconds to pause between API calls (default 0.5)
 #' @return List with $data (combined data frame) and $summary (text report)
@@ -271,7 +285,7 @@ bold_public_search_batch <- function(species_list,
                                      institutes = NULL,
                                      dataset_codes = NULL,
                                      project_codes = NULL,
-                                     max_url_length = 1500,
+                                     batch_size = 50,
                                      quiet = FALSE,
                                      sleep = 0.5) {
 
@@ -282,37 +296,13 @@ bold_public_search_batch <- function(species_list,
   all_missing <- character(0)
 
   if (!has_other_params) {
-    # --- Taxonomy-only: batch by URL length ---
-    # bold_public_search + .counts_query already skip zero-count terms with a
-    # warning for taxonomy-only searches, so we can send many names at once.
-    # We group species into batches that keep the parse URL under max_url_length.
+    # --- Taxonomy-only: batch species for the parse endpoint ---
+    # The parse endpoint has no length limit, but we still batch to avoid
+    # extremely long requests. Internal helpers (.preprocess_query,
+    # .generate_query_id) handle their own sub-splitting to stay within the
+    # BOLD API's 250-char query parameter limit.
 
-    # Base URL length: "https://portal.boldsystems.org/api/query/parse?query=" = 53 chars
-    base_len <- 53
-    batches <- list()
-    current_batch <- character(0)
-    # Each species adds: %22Name%20Name%22 = 4 + nchar(name) + 3*(spaces) chars,
-    # plus %20 separator (3 chars) between terms
-    current_len <- base_len
-
-    for (sp in species_list) {
-      # Encoded length: %22 (3) + name with spaces as %20 (nchar + 2*spaces) + %22 (3)
-      n_spaces <- lengths(regmatches(sp, gregexpr(" ", sp)))
-      sp_encoded_len <- 3 + nchar(sp) + (n_spaces * 2) + 3
-      sep_len <- if (length(current_batch) > 0) 3 else 0  # %20 separator
-
-      if (current_len + sep_len + sp_encoded_len > max_url_length && length(current_batch) > 0) {
-        batches[[length(batches) + 1]] <- current_batch
-        current_batch <- sp
-        current_len <- base_len + sp_encoded_len
-      } else {
-        current_batch <- c(current_batch, sp)
-        current_len <- current_len + sep_len + sp_encoded_len
-      }
-    }
-    if (length(current_batch) > 0) {
-      batches[[length(batches) + 1]] <- current_batch
-    }
+    batches <- split(species_list, ceiling(seq_along(species_list) / batch_size))
 
     for (b in seq_along(batches)) {
       batch <- batches[[b]]
