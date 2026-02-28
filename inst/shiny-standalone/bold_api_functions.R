@@ -111,28 +111,73 @@ BOLD_DATA_RETRIEVE       <- "https://data.boldsystems.org/api/records/retrieve?"
   preprocessed
 }
 
-# Step 4: Generate query ID and build download URL
-.generate_query_id <- function(counts_df) {
+# Step 4: Generate query ID(s) and build download URL(s)
+# When many species are in the batch, the matched triplets (e.g.
+# "taxonomy:Animalia,Chordata,...,Panthera leo") can be very long.
+# Concatenating them all with semicolons can exceed the ~2048 char URL limit,
+# causing HTTP 422. This function splits terms into sub-groups that each fit
+# within the limit and returns a vector of download URLs.
+.generate_query_id <- function(counts_df, max_url_length = 1500) {
   non_zero <- counts_df %>%
     filter(observations > 0) %>%
     arrange(desc(observations))
 
-  query_part <- gsub("/", "%2F",
-                  gsub(" ", "%20",
-                    gsub(":", "%3A",
-                      gsub(";", "%3B",
-                        gsub(",", "%2C",
-                          paste(non_zero$matched, collapse = ";"))))))
+  if (nrow(non_zero) == 0) return(character(0))
 
-  full_url <- paste0(BOLD_PORTAL_QUERY, query_part, "&extent=full")
-  res <- GET(url = full_url, add_headers('accept' = 'application/json'))
-  stop_for_status(res)
+  # Encode each matched term individually so we can measure lengths
+  encode_term <- function(term) {
+    gsub("/", "%2F",
+      gsub(" ", "%20",
+        gsub(":", "%3A",
+          gsub(";", "%3B",
+            gsub(",", "%2C", term)))))
+  }
 
-  query_id <- fromJSON(content(res, "text", encoding = "UTF-8"))$query_id
+  encoded_terms <- vapply(non_zero$matched, encode_term, character(1),
+                          USE.NAMES = FALSE)
 
-  paste0(BOLD_PORTAL_DOWNLOAD,
-         gsub("=", "%3D", query_id),
-         "/download?format=tsv&fields=processid,marker_code")
+  # Base: "https://portal.boldsystems.org/api/query?query=" (48) + "&extent=full" (12) = 60
+  base_len <- nchar(BOLD_PORTAL_QUERY) + nchar("&extent=full")
+
+  # Group terms into sub-batches that fit within max_url_length
+  groups <- list()
+  current_group <- character(0)
+  current_len <- base_len
+
+  for (i in seq_along(encoded_terms)) {
+    term <- encoded_terms[i]
+    # Separator between terms is encoded ";" = "%3B" (3 chars)
+    sep_len <- if (length(current_group) > 0) 3 else 0
+    term_len <- nchar(term)
+
+    if (current_len + sep_len + term_len > max_url_length && length(current_group) > 0) {
+      groups[[length(groups) + 1]] <- current_group
+      current_group <- term
+      current_len <- base_len + term_len
+    } else {
+      current_group <- c(current_group, term)
+      current_len <- current_len + sep_len + term_len
+    }
+  }
+  if (length(current_group) > 0) {
+    groups[[length(groups) + 1]] <- current_group
+  }
+
+  # Make a query call per group and collect download URLs
+  download_urls <- vapply(groups, function(group) {
+    query_part <- paste(group, collapse = "%3B")
+    full_url <- paste0(BOLD_PORTAL_QUERY, query_part, "&extent=full")
+    res <- GET(url = full_url, add_headers('accept' = 'application/json'))
+    stop_for_status(res)
+
+    query_id <- fromJSON(content(res, "text", encoding = "UTF-8"))$query_id
+
+    paste0(BOLD_PORTAL_DOWNLOAD,
+           gsub("=", "%3D", query_id),
+           "/download?format=tsv&fields=processid,marker_code")
+  }, character(1))
+
+  download_urls
 }
 
 # Step 5: Download TSV data
@@ -185,10 +230,14 @@ bold_public_search <- function(taxonomy = NULL,
 
   if (is.null(counts)) return(NULL)
 
-  download_url <- .generate_query_id(counts)
-  data <- .obtain_data(download_url)
+  download_urls <- .generate_query_id(counts)
+  if (length(download_urls) == 0) return(NULL)
 
-  data
+  all_data <- lapply(download_urls, .obtain_data)
+  all_data <- Filter(Negate(is.null), all_data)
+  if (length(all_data) == 0) return(NULL)
+
+  bind_rows(all_data) %>% distinct()
 }
 
 # ---------------------------------------------------------------------------
