@@ -187,7 +187,7 @@ BOLD_QUERY_PARAM_LIMIT <- 245
     query_id <- fromJSON(content(res, "text", encoding = "UTF-8"))$query_id
 
     paste0(BOLD_PORTAL_DOWNLOAD,
-           gsub("=", "%3D", query_id),
+           query_id,
            "/download?format=tsv&fields=processid,marker_code")
   }, character(1))
 
@@ -196,11 +196,14 @@ BOLD_QUERY_PARAM_LIMIT <- 245
 
 # Step 5: Download TSV data
 .obtain_data <- function(download_url) {
-  temp_file <- tempfile()
-  on.exit(unlink(temp_file), add = TRUE)
-  suppressWarnings(download.file(download_url, destfile = temp_file, quiet = TRUE))
-  if (file.size(temp_file) == 0) return(NULL)
-  read.delim(temp_file, sep = '\t', stringsAsFactors = FALSE)
+  res <- GET(url = download_url,
+             add_headers('accept' = 'text/tab-separated-values'))
+  stop_for_status(res)
+
+  tsv_text <- content(res, "text", encoding = "UTF-8")
+  if (is.null(tsv_text) || nchar(trimws(tsv_text)) == 0) return(NULL)
+
+  read.delim(text = tsv_text, sep = '\t', stringsAsFactors = FALSE)
 }
 
 # ---------------------------------------------------------------------------
