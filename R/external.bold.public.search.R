@@ -128,7 +128,10 @@ bold.public.search <- function(taxonomy = NULL,
 
       # Download the data using the query id(s)
 
-      all_data <- lapply(step4, obtain_data)
+      all_data <- lapply(seq_along(step4), function(i) {
+        if (i > 1) Sys.sleep(0.5)
+        obtain_data(step4[i])
+      })
       all_data <- Filter(Negate(is.null), all_data)
       if (length(all_data) == 0) return(NULL)
       dplyr::bind_rows(all_data) %>% dplyr::distinct()
@@ -177,7 +180,10 @@ bold.public.search <- function(taxonomy = NULL,
 
         # Download the data using the query id(s)
 
-        all_data <- lapply(step4, obtain_data)
+        all_data <- lapply(seq_along(step4), function(i) {
+        if (i > 1) Sys.sleep(0.5)
+        obtain_data(step4[i])
+      })
         all_data <- Filter(Negate(is.null), all_data)
         if (length(all_data) == 0) return(NULL)
         dplyr::bind_rows(all_data) %>% dplyr::distinct()

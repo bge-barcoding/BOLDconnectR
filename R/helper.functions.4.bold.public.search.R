@@ -98,7 +98,9 @@ preprocess_query<-function(parsed_query)
   groups <- split_terms(individual_terms)
 
   all_successful <- list()
-  for (group in groups) {
+  for (g_idx in seq_along(groups)) {
+    if (g_idx > 1) Sys.sleep(0.5)
+    group <- groups[[g_idx]]
     query_value <- paste(group, collapse = ";")
     query_preprocess <- gsub(",", "%2C", query_value) %>%
       gsub(":", "%3A", .) %>%
@@ -216,7 +218,10 @@ counts_query<-function (preprocessed_query, taxonomy_only = FALSE)
 
   # For use in the filtering in step4
 
-  query_search_counts_values <- sapply(query_preprocess_summ,function(x){get_counts(summ_url = x)})
+  query_search_counts_values <- vapply(seq_along(query_preprocess_summ), function(i) {
+    if (i > 1) Sys.sleep(0.5)
+    get_counts(summ_url = query_preprocess_summ[i])
+  }, numeric(1))
 
   query_search_counts_df=preprocessed_query%>%
     dplyr::mutate(observations=query_search_counts_values)
@@ -313,7 +318,9 @@ generate_query_id<-function (matched_terms)
   groups <- split_terms(matched_terms_non_zero$matched)
 
   # Make a query call per group and collect download URLs
-  download_urls <- vapply(groups, function(group) {
+  download_urls <- vapply(seq_along(groups), function(g_idx) {
+    if (g_idx > 1) Sys.sleep(0.5)
+    group <- groups[[g_idx]]
     query_value <- paste(group, collapse = ";")
     query_url_part1 <- gsub(",", "%2C", query_value) %>%
       gsub(";", "%3B", .) %>%

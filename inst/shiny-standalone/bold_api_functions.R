@@ -85,7 +85,9 @@ BOLD_QUERY_PARAM_LIMIT <- 245
   groups <- .split_terms(individual_terms)
 
   all_successful <- list()
-  for (group in groups) {
+  for (g_idx in seq_along(groups)) {
+    if (g_idx > 1) Sys.sleep(0.5)
+    group <- groups[[g_idx]]
     query_value <- paste(group, collapse = ";")
     encoded <- gsub(":", "%3A",
                  gsub(";", "%3B",
@@ -129,7 +131,9 @@ BOLD_QUERY_PARAM_LIMIT <- 245
                        gsub(";", "%3B",
                          gsub(":", "%3A", preprocessed$matched))))
 
-  counts <- sapply(encoded_terms, function(term) {
+  counts <- vapply(seq_along(encoded_terms), function(i) {
+    if (i > 1) Sys.sleep(0.5)
+    term <- encoded_terms[i]
     url <- paste0(BOLD_PORTAL_SUMMARY, term,
                   "&fields=specimens&reduce_operation=count")
     res <- GET(url = url, add_headers('accept' = 'application/json'))
@@ -137,7 +141,7 @@ BOLD_QUERY_PARAM_LIMIT <- 245
     json <- fromJSON(content(res, "text", encoding = "UTF-8"))
     ct <- json$counts$specimens
     if (is.null(ct)) 0L else as.integer(ct)
-  }, USE.NAMES = FALSE)
+  }, integer(1))
 
   preprocessed$observations <- counts
 
@@ -173,7 +177,9 @@ BOLD_QUERY_PARAM_LIMIT <- 245
   groups <- .split_terms(non_zero$matched)
 
   # Make a query call per group and collect download URLs
-  download_urls <- vapply(groups, function(group) {
+  download_urls <- vapply(seq_along(groups), function(g_idx) {
+    if (g_idx > 1) Sys.sleep(0.5)
+    group <- groups[[g_idx]]
     query_value <- paste(group, collapse = ";")
     encoded <- gsub("/", "%2F",
                  gsub(" ", "%20",
@@ -250,7 +256,10 @@ bold_public_search <- function(taxonomy = NULL,
   download_urls <- .generate_query_id(counts)
   if (length(download_urls) == 0) return(NULL)
 
-  all_data <- lapply(download_urls, .obtain_data)
+  all_data <- lapply(seq_along(download_urls), function(i) {
+    if (i > 1) Sys.sleep(0.5)
+    .obtain_data(download_urls[i])
+  })
   all_data <- Filter(Negate(is.null), all_data)
   if (length(all_data) == 0) return(NULL)
 
