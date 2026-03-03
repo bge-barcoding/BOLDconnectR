@@ -42,7 +42,21 @@ BOLD_QUERY_PARAM_LIMIT <- 245
 # 2, 4, 8, ... seconds.
 .bold_api_get <- function(url, ..., max_retries = 4) {
   for (attempt in seq_len(max_retries + 1)) {
-    res <- GET(url = url, ...)
+    res <- tryCatch(
+      GET(url = url, ...),
+      error = function(e) {
+        if (attempt <= max_retries) {
+          wait <- 2^attempt
+          message(sprintf("  Connection error, retrying in %ds... (%s)",
+                          wait, conditionMessage(e)))
+          Sys.sleep(wait)
+          return(NULL)
+        }
+        stop(e)
+      }
+    )
+
+    if (is.null(res)) next
 
     if (status_code(res) %in% c(429L, 503L) && attempt <= max_retries) {
       wait <- 2^attempt

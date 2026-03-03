@@ -17,12 +17,27 @@ base_url_query<-'https://portal.boldsystems.org/api/query?query='
 # on the "query" parameter value. We use 245 for a small safety margin.
 bold_query_param_limit <- 245
 
-# Rate-limited GET with exponential backoff retry on transient errors
-# (HTTP 429, 503). Retries up to max_retries times with delays of
-# 2, 4, 8, ... seconds. Also pauses between consecutive calls.
+# Resilient GET with exponential backoff retry on transient errors.
+# Handles both HTTP-level errors (429, 503) and connection-level errors
+# (timeouts, refused connections, DNS failures). Retries up to max_retries
+# times with delays of 2, 4, 8, ... seconds.
 bold_api_get <- function(url, ..., max_retries = 4) {
   for (attempt in seq_len(max_retries + 1)) {
-    res <- httr::GET(url = url, ...)
+    res <- tryCatch(
+      httr::GET(url = url, ...),
+      error = function(e) {
+        if (attempt <= max_retries) {
+          wait <- 2^attempt
+          message(sprintf("  Connection error, retrying in %ds... (%s)",
+                          wait, conditionMessage(e)))
+          Sys.sleep(wait)
+          return(NULL)
+        }
+        stop(e)
+      }
+    )
+
+    if (is.null(res)) next
 
     if (httr::status_code(res) %in% c(429L, 503L) && attempt <= max_retries) {
       wait <- 2^attempt
