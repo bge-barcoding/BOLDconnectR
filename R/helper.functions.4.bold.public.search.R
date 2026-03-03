@@ -12,6 +12,37 @@ base_url_summary<-'https://portal.boldsystems.org/api/summary?query='
 
 base_url_query<-'https://portal.boldsystems.org/api/query?query='
 
+# BOLD API query-parameter character limit.
+# The preprocessor, query, and summary endpoints enforce maxLength: 250
+# on the "query" parameter value. We use 245 for a small safety margin.
+bold_query_param_limit <- 245
+
+# Utility: split a character vector of terms into groups where the
+# semicolon-joined string of each group is <= max_chars.
+split_terms <- function(terms, max_chars = bold_query_param_limit) {
+  groups <- list()
+  current <- character(0)
+  current_len <- 0L
+
+  for (term in terms) {
+    term_len <- nchar(term)
+    sep_len <- if (length(current) > 0) 1L else 0L
+
+    if (current_len + sep_len + term_len > max_chars && length(current) > 0) {
+      groups[[length(groups) + 1]] <- current
+      current <- term
+      current_len <- term_len
+    } else {
+      current <- c(current, term)
+      current_len <- current_len + sep_len + term_len
+    }
+  }
+  if (length(current) > 0) {
+    groups[[length(groups) + 1]] <- current
+  }
+  groups
+}
+
 
 #1.Parse the query
 
@@ -45,7 +76,12 @@ parse_query<-function(query)
   full_url_parse <- URLencode(paste0(base_url_parse,
                                      trial_query_quoted,sep=""))
 
-  get.data_parse=fromJSON(url(full_url_parse))
+  result <- httr::GET(url = full_url_parse,
+                      add_headers('accept' = 'application/json'))
+
+  stop_for_status(result)
+
+  get.data_parse <- fromJSON(content(result, "text", encoding = "UTF-8"))
 
   return(get.data_parse)
 
@@ -55,39 +91,47 @@ parse_query<-function(query)
 
 preprocess_query<-function(parsed_query)
 {
-  query_preprocess<-gsub(",",
-                         "%2C",
-                         parsed_query$terms)%>%
-    gsub(":","%3A",.)%>%
-    gsub(";","%3B",.)%>%
-    gsub(' ','%20',.)
+  # The preprocessor endpoint enforces maxLength: 250 on the query parameter,
+  # so we split the parsed terms (semicolon-delimited) into chunks that fit.
+  individual_terms <- strsplit(parsed_query$terms, ";")[[1]]
 
-  full_url_preprocess<-URLencode(paste0(base_url_preprocess,
-                                        query_preprocess,
-                                        sep=""))
+  groups <- split_terms(individual_terms)
 
-  # Downloading the preprocess data
+  all_successful <- list()
+  for (group in groups) {
+    query_value <- paste(group, collapse = ";")
+    query_preprocess <- gsub(",", "%2C", query_value) %>%
+      gsub(":", "%3A", .) %>%
+      gsub(";", "%3B", .) %>%
+      gsub(' ', '%20', .)
 
-  get.data.pre=tryCatch({
+    full_url_preprocess <- URLencode(paste0(base_url_preprocess,
+                                            query_preprocess,
+                                            sep=""))
 
-    result<-httr::GET(url=full_url_preprocess,
-                      add_headers('accept' = 'application/json'))
+    # Downloading the preprocess data
 
-    stop_for_status(result)
+    get.data.pre=tryCatch({
 
-    result
-  },
-  error = function(e) {
-    stop(paste("Download failed.\nDetails:",e$message))
+      result<-httr::GET(url=full_url_preprocess,
+                        add_headers('accept' = 'application/json'))
+
+      stop_for_status(result)
+
+      result
+    },
+    error = function(e) {
+      stop(paste("Download failed.\nDetails:",e$message))
+    }
+    )
+
+    suppressWarnings(suppressMessages(json_preprocess<-content(get.data.pre,
+                                                               "text")))
+
+    all_successful[[length(all_successful) + 1]] <- fromJSON(json_preprocess)$successful_terms
   }
-  )
 
-  suppressWarnings(suppressMessages(json_preprocess<-content(get.data.pre,
-                                                             "text")))
-
-  json_preprocess_data_final<-fromJSON(json_preprocess)
-
-  json_preprocess_data_final<-fromJSON(json_preprocess)$successful_terms
+  json_preprocess_data_final <- dplyr::bind_rows(all_successful)
 
   json_preprocess_data_final$matched<-gsub(',.*',"",json_preprocess_data_final$matched)
 
@@ -96,14 +140,20 @@ preprocess_query<-function(parsed_query)
   json_preprocess_data_final=json_preprocess_data_final%>%
     dplyr::mutate(names=gsub("^na:na:",'',.$submitted))
 
-  tryCatch({
-    if (any(grepl("ids:", json_preprocess_data_final$matched))) {
-      stop("Re-check search queries")
+  # Filter out terms that resolved to raw IDs instead of taxonomy/geography.
+  # This happens when BOLD can't match a name taxonomically (e.g. mites,
+  # obscure taxa). Instead of failing the whole batch, drop those terms and
+  # warn so the remaining valid species can still be searched.
+  ids_mask <- grepl("ids:", json_preprocess_data_final$matched)
+  if (any(ids_mask)) {
+    bad_names <- json_preprocess_data_final$names[ids_mask]
+    warning("The following terms could not be resolved taxonomically and were skipped: ",
+            paste(bad_names, collapse = ", "), call. = FALSE)
+    json_preprocess_data_final <- json_preprocess_data_final[!ids_mask, , drop = FALSE]
+    if (nrow(json_preprocess_data_final) == 0) {
+      stop("No terms could be resolved taxonomically. Re-check search queries.")
     }
-    # Code continues here if no error
-  }, error = function(e) {
-    stop(e)
-  })
+  }
 
   return(json_preprocess_data_final)
 
@@ -255,61 +305,59 @@ generate_query_id<-function (matched_terms)
     dplyr::filter(observations>0)%>%
     dplyr::arrange(desc(observations))
 
-  query_url_part1<-gsub(",",
-                        "%2C",
-                        paste(matched_terms_non_zero$matched,
-                              collapse = ";"))%>%
-    gsub(";","%3B",.)%>%
-    gsub(":","%3A",.)%>%
-    gsub(" ","%20",.)%>%
-    gsub('/','%2F',.)
+  if (nrow(matched_terms_non_zero) == 0) return(character(0))
 
-  full_query<-paste0(base_url_query,
-                     query_url_part1,
-                     "&extent=full",
-                     sep="")
+  # The /api/query endpoint enforces maxLength: 250 on the query parameter
+  # value. Split matched terms into groups that fit within the limit.
+  groups <- split_terms(matched_terms_non_zero$matched)
 
-  # Download the data
+  # Make a query call per group and collect download URLs
+  download_urls <- vapply(groups, function(group) {
+    query_value <- paste(group, collapse = ";")
+    query_url_part1 <- gsub(",", "%2C", query_value) %>%
+      gsub(";", "%3B", .) %>%
+      gsub(":", "%3A", .) %>%
+      gsub(" ", "%20", .) %>%
+      gsub('/', '%2F', .)
 
-  get.data.query=tryCatch({
+    full_query <- paste0(base_url_query,
+                         query_url_part1,
+                         "&extent=full",
+                         sep="")
 
-    result<-httr::GET(url=full_query,
-                      add_headers('accept' = 'application/json'))
+    # Download the data
 
-    stop_for_status(result)
+    get.data.query=tryCatch({
 
-    result
-  },
-  error = function(e) {
-    stop(paste("Download failed.\nDetails:",e$message))
-  }
-  )
+      result<-httr::GET(url=full_query,
+                        add_headers('accept' = 'application/json'))
+
+      stop_for_status(result)
+
+      result
+    },
+    error = function(e) {
+      stop(paste("Download failed.\nDetails:",e$message))
+    }
+    )
 
     # Extract the data
 
     suppressWarnings(suppressMessages(json_query<-content(get.data.query,
                                                           "text")))
 
+    # Convert the data into text
 
-  # Convert the data into text
+    json_query_data<-fromJSON(json_query)
 
-  json_query_data<-fromJSON(json_query)
+    out = json_query_data$query_id
 
+    paste0("https://portal.boldsystems.org/api/documents/",
+           out,
+           "/download?format=tsv&fields=processid,marker_code")
+  }, character(1))
 
-  out = json_query_data$query_id
-
-
-  #4. Obtain the data based on the query
-
-  url_download_data<-paste("https://portal.boldsystems.org/api/documents/",
-                           gsub("=",
-                                "%3D",
-                                out),
-                           "/download?format=tsv",
-                           "&fields=processid,marker_code",
-                           sep="")
-
-  return(url_download_data)
+  return(download_urls)
 
 }
 
@@ -318,22 +366,18 @@ generate_query_id<-function (matched_terms)
 
 obtain_data<-function(download_url)
 {
+  res <- httr::GET(url = download_url,
+                   add_headers('accept' = 'text/tab-separated-values'))
 
-  temp_file <- tempfile()
+  stop_for_status(res)
 
-  suppressWarnings(download_data<-download.file(download_url,
-                                                destfile = temp_file,
-                                                quiet = TRUE))
-
-  unlink(tempdir())
+  tsv_text <- content(res, "text", encoding = "UTF-8")
 
   # Check to see if there is data downloaded. If no data is available, it will return NULL
 
-  if(file.size(temp_file)==0)return(NULL)
+  if(is.null(tsv_text) || nchar(trimws(tsv_text)) == 0) return(NULL)
 
-
-  final_data<-read.delim(temp_file,
-                         sep='\t')
+  final_data <- read.delim(text = tsv_text, sep = '\t')
 
   return(final_data)
 }

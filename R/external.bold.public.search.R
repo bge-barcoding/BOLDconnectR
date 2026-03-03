@@ -119,13 +119,17 @@ bold.public.search <- function(taxonomy = NULL,
       parameter_validation(step3,
                            non_null_args)
 
-      # Generate the query id
+      # Generate the query id(s) — may return multiple URLs when terms
+      # are split to stay within the 250-char API limit
 
       step4 = generate_query_id(step3)
 
-      # Download the data using the query id
+      # Download the data using the query id(s)
 
-      obtain_data(step4)
+      all_data <- lapply(step4, obtain_data)
+      all_data <- Filter(Negate(is.null), all_data)
+      if (length(all_data) == 0) return(NULL)
+      dplyr::bind_rows(all_data) %>% dplyr::distinct()
 
     },
 
@@ -163,13 +167,16 @@ bold.public.search <- function(taxonomy = NULL,
 
         parameter_validation(step3,non_null_args)
 
-        # Generate the query id
+        # Generate the query id(s)
 
         step4 = generate_query_id(step3)
 
-        # Download the data using the query id
+        # Download the data using the query id(s)
 
-        obtain_data(step4)
+        all_data <- lapply(step4, obtain_data)
+        all_data <- Filter(Negate(is.null), all_data)
+        if (length(all_data) == 0) return(NULL)
+        dplyr::bind_rows(all_data) %>% dplyr::distinct()
 
       },
 
