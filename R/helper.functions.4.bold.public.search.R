@@ -285,11 +285,12 @@ parameter_validation <- function(df_counts, non_null_args)
 
     relevant_names <- df_counts$names[df_counts$prefix == prefix_expected]
 
-    # Logical condition to check whether the prefixes in data match any of the expected prefixes
+    # Only validate terms that survived preprocessing and counting.
+    # Terms can legitimately disappear (filtered as ids: or zero-count),
+    # so we only check that surviving terms have the correct prefix.
+    surviving_input <- intersect(non_null_args[[query_param]], df_counts$names)
 
-    if (!all(non_null_args[[query_param]] %in% relevant_names)) stop("")
-
-    #stopifnot(all(non_null_args[[query_param]] %in% relevant_names))
+    if (length(surviving_input) > 0 && !all(surviving_input %in% relevant_names)) stop("")
   }
 
 }
