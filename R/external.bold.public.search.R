@@ -114,6 +114,8 @@ bold.public.search <- function(taxonomy = NULL,
 
       step3 = counts_query(step2)
 
+      if (is.null(step3)) return(NULL)
+
       # Function checks whether the input query terms entered are in their respective parameter arguments. Example: Costa Rica should be placed in geography and not in taxonomy. If the functions finds such a placement, the code will stop and the final result obtained will be NULL
 
       parameter_validation(step3,
@@ -135,7 +137,7 @@ bold.public.search <- function(taxonomy = NULL,
 
     error = function(e) {
 
-      message("No records found with given criteria")
+      message(paste0("No records found with given criteria. Details: ", e$message))
 
       return(NULL)
     })
@@ -163,6 +165,8 @@ bold.public.search <- function(taxonomy = NULL,
       {
         step3 = counts_query(step2, taxonomy_only = is_taxonomy_only)
 
+        if (is.null(step3)) return(NULL)
+
         # Function checks whether the input query terms entered are correctly added in the respective parameter arguments. Example: Costa Rica should be placed in geography and not in taxonomy. If the function finds such a placement, the code will stop and the final result obtained will be NULL.
 
         parameter_validation(step3,non_null_args)
@@ -182,7 +186,7 @@ bold.public.search <- function(taxonomy = NULL,
 
       error = function(e) {
 
-        message("No records found with given criteria")
+        message(paste0("No records found with given criteria. Details: ", e$message))
 
         return(NULL)
 
