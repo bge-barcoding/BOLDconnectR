@@ -37,6 +37,26 @@ BOLD_QUERY_PARAM_LIMIT <- 245
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+# Rate-limited GET with exponential backoff retry on transient errors
+# (HTTP 429, 503). Retries up to max_retries times with delays of
+# 2, 4, 8, ... seconds.
+.bold_api_get <- function(url, ..., max_retries = 4) {
+  for (attempt in seq_len(max_retries + 1)) {
+    res <- GET(url = url, ...)
+
+    if (status_code(res) %in% c(429L, 503L) && attempt <= max_retries) {
+      wait <- 2^attempt
+      message(sprintf("  Rate limited (HTTP %d), retrying in %ds...",
+                      status_code(res), wait))
+      Sys.sleep(wait)
+      next
+    }
+
+    stop_for_status(res)
+    return(res)
+  }
+}
+
 # Utility: split a character vector of terms into groups where the
 # semicolon-joined string of each group is <= max_chars.
 .split_terms <- function(terms, max_chars = BOLD_QUERY_PARAM_LIMIT) {
@@ -70,8 +90,7 @@ BOLD_QUERY_PARAM_LIMIT <- 245
   quoted <- paste0('%22', gsub(' ', '%20', query_terms), '%22')
   combined <- paste(quoted, collapse = '%20')
   full_url <- URLencode(paste0(BOLD_PORTAL_PARSE, combined))
-  res <- GET(url = full_url, add_headers('accept' = 'application/json'))
-  stop_for_status(res)
+  res <- .bold_api_get(full_url, add_headers('accept' = 'application/json'))
   fromJSON(content(res, "text", encoding = "UTF-8"))
 }
 
@@ -95,8 +114,7 @@ BOLD_QUERY_PARAM_LIMIT <- 245
                      gsub(" ", "%20", query_value))))
     full_url <- URLencode(paste0(BOLD_PORTAL_PREPROCESS, encoded))
 
-    res <- GET(url = full_url, add_headers('accept' = 'application/json'))
-    stop_for_status(res)
+    res <- .bold_api_get(full_url, add_headers('accept' = 'application/json'))
 
     json_data <- fromJSON(content(res, "text", encoding = "UTF-8"))
     all_successful[[length(all_successful) + 1]] <- json_data$successful_terms
@@ -136,8 +154,7 @@ BOLD_QUERY_PARAM_LIMIT <- 245
     term <- encoded_terms[i]
     url <- paste0(BOLD_PORTAL_SUMMARY, term,
                   "&fields=specimens&reduce_operation=count")
-    res <- GET(url = url, add_headers('accept' = 'application/json'))
-    stop_for_status(res)
+    res <- .bold_api_get(url, add_headers('accept' = 'application/json'))
     json <- fromJSON(content(res, "text", encoding = "UTF-8"))
     ct <- json$counts$specimens
     if (is.null(ct)) 0L else as.integer(ct)
@@ -187,8 +204,7 @@ BOLD_QUERY_PARAM_LIMIT <- 245
                      gsub(";", "%3B",
                        gsub(",", "%2C", query_value)))))
     full_url <- paste0(BOLD_PORTAL_QUERY, encoded, "&extent=full")
-    res <- GET(url = full_url, add_headers('accept' = 'application/json'))
-    stop_for_status(res)
+    res <- .bold_api_get(full_url, add_headers('accept' = 'application/json'))
 
     query_id <- fromJSON(content(res, "text", encoding = "UTF-8"))$query_id
 
@@ -202,9 +218,8 @@ BOLD_QUERY_PARAM_LIMIT <- 245
 
 # Step 5: Download TSV data
 .obtain_data <- function(download_url) {
-  res <- GET(url = download_url,
-             add_headers('accept' = 'text/tab-separated-values'))
-  stop_for_status(res)
+  res <- .bold_api_get(download_url,
+                       add_headers('accept' = 'text/tab-separated-values'))
 
   tsv_text <- content(res, "text", encoding = "UTF-8")
   if (is.null(tsv_text) || nchar(trimws(tsv_text)) == 0) return(NULL)

@@ -17,6 +17,26 @@ base_url_query<-'https://portal.boldsystems.org/api/query?query='
 # on the "query" parameter value. We use 245 for a small safety margin.
 bold_query_param_limit <- 245
 
+# Rate-limited GET with exponential backoff retry on transient errors
+# (HTTP 429, 503). Retries up to max_retries times with delays of
+# 2, 4, 8, ... seconds. Also pauses between consecutive calls.
+bold_api_get <- function(url, ..., max_retries = 4) {
+  for (attempt in seq_len(max_retries + 1)) {
+    res <- httr::GET(url = url, ...)
+
+    if (httr::status_code(res) %in% c(429L, 503L) && attempt <= max_retries) {
+      wait <- 2^attempt
+      message(sprintf("  Rate limited (HTTP %d), retrying in %ds...",
+                      httr::status_code(res), wait))
+      Sys.sleep(wait)
+      next
+    }
+
+    stop_for_status(res)
+    return(res)
+  }
+}
+
 # Utility: split a character vector of terms into groups where the
 # semicolon-joined string of each group is <= max_chars.
 split_terms <- function(terms, max_chars = bold_query_param_limit) {
@@ -76,10 +96,8 @@ parse_query<-function(query)
   full_url_parse <- URLencode(paste0(base_url_parse,
                                      trial_query_quoted,sep=""))
 
-  result <- httr::GET(url = full_url_parse,
-                      add_headers('accept' = 'application/json'))
-
-  stop_for_status(result)
+  result <- bold_api_get(full_url_parse,
+                         add_headers('accept' = 'application/json'))
 
   get.data_parse <- fromJSON(content(result, "text", encoding = "UTF-8"))
 
@@ -113,19 +131,8 @@ preprocess_query<-function(parsed_query)
 
     # Downloading the preprocess data
 
-    get.data.pre=tryCatch({
-
-      result<-httr::GET(url=full_url_preprocess,
-                        add_headers('accept' = 'application/json'))
-
-      stop_for_status(result)
-
-      result
-    },
-    error = function(e) {
-      stop(paste("Download failed.\nDetails:",e$message))
-    }
-    )
+    get.data.pre <- bold_api_get(full_url_preprocess,
+                                 add_headers('accept' = 'application/json'))
 
     suppressWarnings(suppressMessages(json_preprocess<-content(get.data.pre,
                                                                "text")))
@@ -183,19 +190,8 @@ counts_query<-function (preprocessed_query, taxonomy_only = FALSE)
                                      "&fields=specimens&reduce_operation=count",
                                      sep="")
 
-    get.data.pre.summ=tryCatch({
-
-      result<-httr::GET(url=full_url_preprocess_summ,
-                        add_headers('accept' = 'application/json'))
-
-      stop_for_status(result)
-
-      result
-    },
-    error = function(e) {
-      stop(paste("Download failed.\nDetails:",e$message))
-    }
-    )
+    get.data.pre.summ <- bold_api_get(full_url_preprocess_summ,
+                                      add_headers('accept' = 'application/json'))
 
     suppressWarnings(suppressMessages(json_preprocess_summ<-content(get.data.pre.summ,
                                                                     "text")))
@@ -335,19 +331,8 @@ generate_query_id<-function (matched_terms)
 
     # Download the data
 
-    get.data.query=tryCatch({
-
-      result<-httr::GET(url=full_query,
-                        add_headers('accept' = 'application/json'))
-
-      stop_for_status(result)
-
-      result
-    },
-    error = function(e) {
-      stop(paste("Download failed.\nDetails:",e$message))
-    }
-    )
+    get.data.query <- bold_api_get(full_query,
+                                   add_headers('accept' = 'application/json'))
 
     # Extract the data
 
@@ -374,10 +359,8 @@ generate_query_id<-function (matched_terms)
 
 obtain_data<-function(download_url)
 {
-  res <- httr::GET(url = download_url,
-                   add_headers('accept' = 'text/tab-separated-values'))
-
-  stop_for_status(res)
+  res <- bold_api_get(download_url,
+                      add_headers('accept' = 'text/tab-separated-values'))
 
   tsv_text <- content(res, "text", encoding = "UTF-8")
 
